@@ -183,6 +183,95 @@ fn curvature_clicks_build_smooth_path() {
     assert_eq!(paths(&s).len(), 2);
 }
 
+/// Press and release the active tool at a point.
+fn tap(s: &mut Session, x: f64, y: f64) {
+    let v = view();
+    s.pointer(&PointerEvent::new(PointerKind::Down, x, y), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Up, x, y), v).unwrap();
+}
+
+/// Three curvature clicks, then Esc: a finished open path.
+fn finished_curvature(s: &mut Session) -> NodeId {
+    s.select_tool("curvature", view()).unwrap();
+    for (x, y) in [(100.0, 300.0), (200.0, 200.0), (300.0, 300.0)] {
+        tap(s, x, y);
+    }
+    s.tool_key(ToolKey::Escape, Mods::default(), view()).unwrap();
+    paths(s)[0].0
+}
+
+#[test]
+fn curvature_continues_a_finished_path_from_its_last_point() {
+    let mut s = session();
+    let id = finished_curvature(&mut s);
+    tap(&mut s, 300.0, 300.0);
+    tap(&mut s, 400.0, 200.0);
+    assert_eq!(paths(&s).len(), 1);
+    let sp = &path(&s, id).subpaths[0];
+    assert_eq!(sp.anchors.len(), 4);
+    assert_eq!(sp.anchors[3].p, Point::new(400.0, 200.0));
+    assert_eq!(sp.anchors[2].kind, vectorcraft_geom::AnchorKind::Smooth, "the old end is smooth now");
+}
+
+#[test]
+fn curvature_continues_a_finished_path_from_its_first_point() {
+    let mut s = session();
+    let id = finished_curvature(&mut s);
+    tap(&mut s, 100.0, 300.0);
+    tap(&mut s, 50.0, 200.0);
+    assert_eq!(paths(&s).len(), 1);
+    let sp = &path(&s, id).subpaths[0];
+    assert_eq!(sp.anchors.len(), 4);
+    assert!(sp.anchors.iter().any(|a| a.p == Point::new(50.0, 200.0)));
+    assert!(sp.anchors.iter().any(|a| a.p == Point::new(300.0, 300.0)));
+}
+
+#[test]
+fn curvature_edits_a_finished_path_after_a_tool_switch() {
+    let mut s = session();
+    let v = view();
+    let id = finished_curvature(&mut s);
+    s.select_tool("selection", v).unwrap();
+    s.execute("select.none", &json!({})).unwrap();
+    s.select_tool("curvature", v).unwrap();
+    // Alt-click the middle point → corner.
+    s.pointer(&PointerEvent::new(PointerKind::Down, 200.0, 200.0).with_mods(Mods { alt: true, ..Default::default() }), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Up, 200.0, 200.0), v).unwrap();
+    assert_eq!(s.doc().unwrap().selection.objects, vec![id], "the path is selected");
+    assert!(!path(&s, id).subpaths[0].anchors[1].has_out());
+    // Drag it.
+    s.pointer(&PointerEvent::new(PointerKind::Down, 200.0, 200.0), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Drag, 200.0, 150.0), v).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Up, 200.0, 150.0), v).unwrap();
+    assert_eq!(paths(&s).len(), 1);
+    assert_eq!(path(&s, id).subpaths[0].anchors[1].p, Point::new(200.0, 150.0));
+}
+
+#[test]
+fn curvature_leaves_pen_paths_and_shapes_alone() {
+    let mut s = session();
+    let v = view();
+    let r = rect(&mut s, 100.0, 100.0, 100.0, 100.0);
+    s.select_tool("curvature", v).unwrap();
+    tap(&mut s, 100.0, 100.0);
+    assert_eq!(paths(&s).len(), 2, "a corner of a rectangle starts a new path");
+    assert_eq!(path(&s, r).anchor_count(), 4);
+    // A pen path with hand-set handles is not re-fitted.
+    s.tool_key(ToolKey::Escape, Mods::default(), v).unwrap();
+    let id = s
+        .execute(
+            "path.create",
+            &json!({"anchors": [{"x": 400.0, "y": 400.0, "out": [440.0, 360.0]}, {"x": 500.0, "y": 400.0, "in": [470.0, 460.0]}]}),
+        )
+        .unwrap();
+    let id = NodeId(id["id"].as_u64().unwrap());
+    let before = path(&s, id);
+    s.execute("select.none", &json!({})).unwrap();
+    tap(&mut s, 400.0, 400.0);
+    assert_eq!(path(&s, id), before);
+    assert_eq!(paths(&s).len(), 3);
+}
+
 #[test]
 fn curvature_click_first_point_closes() {
     let mut s = session();
